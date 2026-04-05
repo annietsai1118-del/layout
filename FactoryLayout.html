@@ -1,0 +1,256 @@
+<!DOCTYPE html>
+<html lang="zh-TW">
+<head>
+    <meta charset="UTF-8">
+    <title>Wafer Works 廠區規劃系統 v2.7 - 工程標註版</title>
+    <style>
+        body { display: flex; margin: 0; font-family: 'Segoe UI', 'Microsoft JhengHei', sans-serif; height: 100vh; background: #f0f2f5; overflow: hidden; }
+        #controls { width: 350px; padding: 20px; background: #ffffff; border-right: 1px solid #d1d1d1; overflow-y: auto; box-shadow: 4px 0 10px rgba(0,0,0,0.05); z-index: 10; }
+        h2 { font-size: 1.1rem; color: #0056b3; border-bottom: 2px solid #e9ecef; padding-bottom: 8px; margin-top: 15px; }
+        .group { margin-bottom: 12px; }
+        label { display: block; font-size: 0.85rem; margin: 8px 0 4px; color: #555; }
+        .row { display: flex; gap: 8px; }
+        input { flex: 1; padding: 8px; border: 1px solid #ced4da; border-radius: 4px; font-size: 0.9rem; }
+        button { width: 100%; padding: 10px; margin-top: 8px; border: none; border-radius: 4px; cursor: pointer; font-weight: bold; transition: 0.3s; }
+        .btn-blue { background: #007bff; color: white; }
+        .btn-cyan { background: #17a2b8; color: white; }
+        .btn-green { background: #28a745; color: white; }
+        .btn-orange { background: #fd7e14; color: white; }
+        .btn-purple { background: #6f42c1; color: white; }
+        button:hover { opacity: 0.85; transform: translateY(-1px); }
+        #canvas-outer { flex-grow: 1; position: relative; background: #e2e2e2; display: flex; align-items: center; justify-content: center; overflow: auto; }
+        #canvas-container { background: #fff; box-shadow: 0 0 20px rgba(0,0,0,0.2); }
+        #msg-box { position: absolute; bottom: 20px; right: 20px; padding: 12px 20px; border-radius: 5px; display: none; z-index: 100; font-size: 0.9rem; color: white; background: #dc3545; box-shadow: 0 4px 12px rgba(0,0,0,0.3); }
+    </style>
+</head>
+<body>
+
+<div id="controls">
+    <h2>1. 廠區大小 (cm)</h2>
+    <div class="group">
+        <label>廠區尺寸 (X長 x Y寬)</label>
+        <div class="row">
+            <input type="number" id="facX" value="1400">
+            <input type="number" id="facY" value="720">
+        </div>
+        <button class="btn-blue" onclick="initFactory()">🔄 重設廠區</button>
+    </div>
+
+    <h2>2. 柱子設定 (cm)</h2>
+    <div class="group">
+        <label>柱子尺寸 (X寬 x Y深)</label>
+        <div class="row">
+            <input type="number" id="colX" value="10">
+            <input type="number" id="colY" value="10">
+        </div>
+        <label>柱子間距 (X向 x Y向)</label>
+        <div class="row">
+            <input type="number" id="gapX" value="140">
+            <input type="number" id="gapY" value="720">
+        </div>
+        <button class="btn-cyan" onclick="drawColumns()">📏 更新柱子</button>
+    </div>
+
+    <h2>3. 走道與機台新增</h2>
+    <div class="group">
+        <label>最小走道預留 (cm)</label>
+        <input type="number" id="minAisle" value="60">
+    </div>
+    <div class="group" style="background: #f8f9fa; padding: 10px; border-radius: 5px; border: 1px dashed #ccc;">
+        <label>機台名稱</label>
+        <input type="text" id="mName" placeholder="機台名稱">
+        <label>機台尺寸 (X長 x Y寬 cm)</label>
+        <div class="row">
+            <input type="number" id="mL" placeholder="319">
+            <input type="number" id="mW" placeholder="140">
+        </div>
+        <button class="btn-green" onclick="addMachine()">➕ 加入機台</button>
+    </div>
+
+    <h2>4. 輸出與排列</h2>
+    <button class="btn-orange" onclick="autoArrange()">✨ 智能排列</button>
+    <button class="btn-purple" onclick="exportImage()">💾 導出工程圖 PNG</button>
+</div>
+
+<div id="canvas-outer">
+    <div id="canvas-container"></div>
+    <div id="msg-box"></div>
+</div>
+
+<script src="https://unpkg.com/konva@9/konva.min.js"></script>
+
+<script>
+    /* --- JavaScript 核心與標註邏輯 --- */
+    let stage, layer, guideLayer, dimLayer;
+    let allMachines = []; let allColumns = [];
+    let scale = 0.4; const SNAP_DIST = 5;
+
+    function initFactory() {
+        const facX = parseFloat(document.getElementById('facX').value);
+        const facY = parseFloat(document.getElementById('facY').value);
+        const container = document.getElementById('canvas-outer');
+        scale = Math.min((container.offsetWidth - 100) / facX, (container.offsetHeight - 100) / facY);
+        if (stage) stage.destroy();
+        stage = new Konva.Stage({ container: 'canvas-container', width: facX * scale, height: facY * scale });
+        layer = new Konva.Layer();
+        dimLayer = new Konva.Layer(); // 標註層
+        guideLayer = new Konva.Layer(); // 對齊線層
+        stage.add(layer, dimLayer, guideLayer);
+        allMachines = []; drawColumns();
+    }
+
+    function cmToPx(cm) { return cm * scale; }
+    function pxToCm(px) { return (px / scale).toFixed(1); }
+
+    function drawColumns() {
+        stage.find('.column').forEach(c => c.destroy());
+        const cX = cmToPx(parseFloat(document.getElementById('colX').value));
+        const cY = cmToPx(parseFloat(document.getElementById('colY').value));
+        const gX = cmToPx(parseFloat(document.getElementById('gapX').value));
+        const gY = cmToPx(parseFloat(document.getElementById('gapY').value));
+        for (let x = 0; x <= stage.width() - cX + 1; x += (gX + cX)) {
+            for (let y = 0; y <= stage.height() - cY + 1; y += (gY + cY)) {
+                let col = new Konva.Rect({ x: x, y: y, width: cX, height: cY, fill: '#444', name: 'column' });
+                layer.add(col); allColumns.push(col);
+            }
+        }
+        layer.draw();
+    }
+
+    function addMachine() {
+        const name = document.getElementById('mName').value || "機台";
+        const wCm = parseFloat(document.getElementById('mL').value);
+        const hCm = parseFloat(document.getElementById('mW').value);
+        const w = cmToPx(wCm); const h = cmToPx(hCm);
+        
+        const group = new Konva.Group({ x: 100, y: 100, draggable: true, name: 'machine' });
+        group.setAttr('origW', wCm); group.setAttr('origH', hCm); // 儲存原始尺寸數據
+
+        const rect = new Konva.Rect({ width: w, height: h, fill: '#007bff22', stroke: '#007bff', strokeWidth: 2, name: 'mRect' });
+        const text = new Konva.Text({ text: name, fontSize: 12, fontStyle: 'bold', padding: 5, fill: '#333', width: w, align: 'center' });
+        
+        group.add(rect, text);
+        layer.add(group);
+        allMachines.push(group);
+
+        group.on('dragmove', () => { handleDrag(group); updateAllDimensions(); });
+        group.on('dragend', () => { guideLayer.destroyChildren().draw(); updateAllDimensions(); });
+        
+        updateAllDimensions();
+        layer.draw();
+    }
+
+    // --- ✨ 核心：更新所有尺寸與距邊標註 ---
+    function updateAllDimensions() {
+        dimLayer.destroyChildren(); // 清除舊標註
+
+        allMachines.forEach(mGroup => {
+            const mRect = mGroup.findOne('.mRect').getClientRect();
+            const wCm = mGroup.getAttr('origW');
+            const hCm = mGroup.getAttr('origH');
+
+            // 1. 標註機台本身大小 (置於機台下方)
+            const sizeLabel = new Konva.Text({
+                x: mRect.x, y: mRect.y + mRect.height + 2,
+                text: `${wCm} x ${hCm} cm`,
+                fontSize: 10, fill: '#0056b3', width: mRect.width, align: 'center'
+            });
+            dimLayer.add(sizeLabel);
+
+            // 2. 標註與四面牆的距離 (灰色細線)
+            drawDimLine(mRect.x, mRect.y + mRect.height/2, 0, mRect.y + mRect.height/2, pxToCm(mRect.x)); // 左
+            drawDimLine(mRect.x + mRect.width, mRect.y + mRect.height/2, stage.width(), mRect.y + mRect.height/2, pxToCm(stage.width() - (mRect.x + mRect.width))); // 右
+            drawDimLine(mRect.x + mRect.width/2, mRect.y, mRect.x + mRect.width/2, 0, pxToCm(mRect.y)); // 上
+            drawDimLine(mRect.x + mRect.width/2, mRect.y + mRect.height, mRect.x + mRect.width/2, stage.height(), pxToCm(stage.height() - (mRect.y + mRect.height))); // 下
+        });
+        dimLayer.draw();
+    }
+
+    // 繪製單條標註線與文字
+    function drawDimLine(x1, y1, x2, y2, val) {
+        const line = new Konva.Line({ points: [x1, y1, x2, y2], stroke: '#999', strokeWidth: 0.5, dash: [2, 2] });
+        const txt = new Konva.Text({
+            x: (x1 + x2) / 2, y: (y1 + y2) / 2 - 10,
+            text: val + "cm", fontSize: 9, fill: '#666', align: 'center'
+        });
+        dimLayer.add(line, txt);
+    }
+
+    function handleDrag(activeGroup) {
+        guideLayer.destroyChildren();
+        const minAisle = parseFloat(document.getElementById('minAisle').value);
+        const minAislePx = cmToPx(minAisle);
+        const activeRect = activeGroup.findOne('.mRect').getClientRect();
+        let isError = false;
+
+        // 碰撞檢查 (牆與物件)
+        if (activeRect.x < minAislePx || activeRect.y < minAislePx || 
+            (activeRect.x + activeRect.width) > (stage.width() - minAislePx) || 
+            (activeRect.y + activeRect.height) > (stage.height() - minAislePx)) isError = true;
+
+        stage.find('.column, .machine').forEach(target => {
+            if (target === activeGroup) return;
+            const tRect = target.name() === 'machine' ? target.findOne('.mRect').getClientRect() : target.getClientRect();
+            
+            // 吸附邏輯
+            const absPos = activeGroup.absolutePosition();
+            if (Math.abs(absPos.x - tRect.x) < SNAP_DIST) { activeGroup.x(tRect.x); drawGuide(tRect.x, 0, tRect.x, stage.height()); }
+            if (Math.abs(absPos.y - tRect.y) < SNAP_DIST) { activeGroup.y(tRect.y); drawGuide(0, tRect.y, stage.width(), tRect.y); }
+
+            const dx = Math.max(0, activeRect.x - (tRect.x + tRect.width), tRect.x - (activeRect.x + activeRect.width));
+            const dy = Math.max(0, activeRect.y - (tRect.y + tRect.height), tRect.y - (activeRect.y + activeRect.height));
+            if (Math.sqrt(dx*dx + dy*dy) < minAislePx) isError = true;
+        });
+
+        const mRect = activeGroup.findOne('.mRect');
+        mRect.fill(isError ? '#ff4d4d66' : '#007bff22');
+        document.getElementById('msg-box').style.display = isError ? 'block' : 'none';
+        document.getElementById('msg-box').innerText = isError ? "⚠️ 警告：走道空間不足" : "";
+        guideLayer.draw(); layer.batchDraw();
+    }
+
+    function drawGuide(x1, y1, x2, y2) {
+        guideLayer.add(new Konva.Line({ points: [x1, y1, x2, y2], stroke: '#007bff', strokeWidth: 1, dash: [4, 4] }));
+    }
+
+    function autoArrange() {
+        const minAislePx = cmToPx(parseFloat(document.getElementById('minAisle').value));
+        let curX = minAislePx, curY = minAislePx, rowMaxH = 0;
+        allMachines.forEach(mGroup => {
+            const mRect = mGroup.findOne('.mRect').getClientRect();
+            while (true) {
+                if (curX + mRect.width + minAislePx > stage.width()) { curX = minAislePx; curY += rowMaxH + minAislePx; rowMaxH = 0; }
+                if (curY + mRect.height + minAislePx > stage.height()) { alert("空間已滿！"); return; }
+                if (isPosSafe({ x: curX, y: curY, width: mRect.width, height: mRect.height }, minAislePx)) {
+                    mGroup.position({ x: curX, y: curY });
+                    curX += mRect.width + minAislePx; rowMaxH = Math.max(rowMaxH, mRect.height); break;
+                } else { curX += cmToPx(10); }
+            }
+        });
+        updateAllDimensions(); layer.batchDraw();
+    }
+
+    function isPosSafe(box, aisle) {
+        if (box.x < aisle || box.y < aisle || box.x + box.width > stage.width() - aisle || box.y + box.height > stage.height() - aisle) return false;
+        for (let col of allColumns) {
+            const t = col.getClientRect();
+            const dx = Math.max(0, box.x - (t.x + t.width), t.x - (box.x + box.width));
+            const dy = Math.max(0, box.y - (t.y + t.height), t.y - (box.y + box.height));
+            if (Math.sqrt(dx*dx + dy*dy) < aisle) return false;
+        }
+        return true;
+    }
+
+    function exportImage() {
+        guideLayer.destroyChildren(); // 導出前清除藍色對齊線
+        const dataURL = stage.toDataURL({ pixelRatio: 3 });
+        const link = document.createElement('a');
+        link.download = `Factory_Layout_Engineering_${new Date().getTime()}.png`;
+        link.href = dataURL; document.body.appendChild(link);
+        link.click(); document.body.removeChild(link);
+    }
+
+    initFactory();
+</script>
+</body>
+</html>
